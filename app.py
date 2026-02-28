@@ -176,26 +176,77 @@ BINANCE_SYMBOLS = {
 
 
 def get_realtime_price(ticker: str) -> dict:
-    """Fetch real-time price from Binance public API (no auth needed)."""
+    """Fetch real-time price from multiple APIs with fallback."""
+    
+    # CoinGecko ID mapping
+    COINGECKO_IDS = {
+        "BTC-USD": "bitcoin", "ETH-USD": "ethereum", "SOL-USD": "solana",
+        "DOT-USD": "polkadot", "LINK-USD": "chainlink", "AVAX-USD": "avalanche-2",
+        "ADA-USD": "cardano", "XRP-USD": "ripple", "HBAR-USD": "hedera-hashgraph",
+        "TAO-USD": "bittensor",
+    }
+    
+    # CryptoCompare symbol mapping
+    CC_SYMBOLS = {
+        "BTC-USD": "BTC", "ETH-USD": "ETH", "SOL-USD": "SOL",
+        "DOT-USD": "DOT", "LINK-USD": "LINK", "AVAX-USD": "AVAX",
+        "ADA-USD": "ADA", "XRP-USD": "XRP", "HBAR-USD": "HBAR",
+        "TAO-USD": "TAO",
+    }
+    
+    # === Try 1: CoinGecko (most reliable from cloud) ===
+    cg_id = COINGECKO_IDS.get(ticker)
+    if cg_id:
+        try:
+            url = f"https://api.coingecko.com/api/v3/simple/price?ids={cg_id}&vs_currencies=usd&include_24hr_change=true&include_24hr_vol=true"
+            resp = requests.get(url, timeout=8)
+            if resp.status_code == 200:
+                data = resp.json().get(cg_id, {})
+                if "usd" in data:
+                    return {
+                        "price": float(data["usd"]),
+                        "change_pct": float(data.get("usd_24h_change", 0)),
+                        "volume_24h": float(data.get("usd_24h_vol", 0)),
+                        "source": "CoinGecko (real-time)",
+                    }
+        except Exception:
+            pass
+    
+    # === Try 2: CryptoCompare ===
+    cc_sym = CC_SYMBOLS.get(ticker)
+    if cc_sym:
+        try:
+            url = f"https://min-api.cryptocompare.com/data/pricemultifull?fsyms={cc_sym}&tsyms=USD"
+            resp = requests.get(url, timeout=8)
+            if resp.status_code == 200:
+                data = resp.json().get("RAW", {}).get(cc_sym, {}).get("USD", {})
+                if "PRICE" in data:
+                    return {
+                        "price": float(data["PRICE"]),
+                        "change_pct": float(data.get("CHANGEPCT24HOUR", 0)),
+                        "volume_24h": float(data.get("TOTALVOLUME24HTO", 0)),
+                        "source": "CryptoCompare (real-time)",
+                    }
+        except Exception:
+            pass
+    
+    # === Try 3: Binance ===
     symbol = BINANCE_SYMBOLS.get(ticker)
-    if not symbol:
-        return None
-    try:
-        # Get 24h ticker for price + change
-        url = f"https://api.binance.com/api/v3/ticker/24hr?symbol={symbol}"
-        resp = requests.get(url, timeout=5)
-        if resp.status_code == 200:
-            data = resp.json()
-            return {
-                "price": float(data["lastPrice"]),
-                "change_pct": float(data["priceChangePercent"]),
-                "high_24h": float(data["highPrice"]),
-                "low_24h": float(data["lowPrice"]),
-                "volume_24h": float(data["quoteVolume"]),
-                "source": "Binance (real-time)",
-            }
-    except Exception:
-        pass
+    if symbol:
+        try:
+            url = f"https://api.binance.com/api/v3/ticker/24hr?symbol={symbol}"
+            resp = requests.get(url, timeout=5)
+            if resp.status_code == 200:
+                data = resp.json()
+                return {
+                    "price": float(data["lastPrice"]),
+                    "change_pct": float(data["priceChangePercent"]),
+                    "volume_24h": float(data.get("quoteVolume", 0)),
+                    "source": "Binance (real-time)",
+                }
+        except Exception:
+            pass
+    
     return None
 
 
