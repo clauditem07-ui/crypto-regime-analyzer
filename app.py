@@ -206,7 +206,9 @@ def compute_features(df: pd.DataFrame, rsi_period: int = 14) -> pd.DataFrame:
     
     # Volatility (20-period rolling std of returns)
     data["volatility"] = data["log_return"].rolling(window=20, min_periods=5).std()
-    data["vol_norm"] = (data["volatility"] - data["volatility"].mean()) / data["volatility"].std().clip(lower=1e-8)
+    vol_std = data["volatility"].std()
+    vol_std = vol_std if vol_std > 1e-8 else 1e-8
+    data["vol_norm"] = (data["volatility"] - data["volatility"].mean()) / vol_std
     data["vol_norm"] = data["vol_norm"].clip(-3, 3)
     
     data.dropna(inplace=True)
