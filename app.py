@@ -592,6 +592,12 @@ if run_analysis:
     fig.add_hline(y=50, line_dash="dot", line_color="rgba(139,148,158,0.3)", row=2, col=1)
     
     # Regime probabilities (stacked area)
+    def hex_to_rgba(hex_color, alpha=0.4):
+        """Convert hex color to rgba string."""
+        h = hex_color.lstrip("#")
+        r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+        return f"rgba({r},{g},{b},{alpha})"
+    
     for i in range(n_regimes):
         fig.add_trace(
             go.Scatter(
@@ -600,7 +606,7 @@ if run_analysis:
                 mode="lines",
                 fill="tonexty" if i > 0 else "tozeroy",
                 line=dict(width=0.5, color=colors[i]),
-                fillcolor=colors[i].replace(")", ", 0.4)").replace("rgb", "rgba") if "rgb" in colors[i] else colors[i] + "66",
+                fillcolor=hex_to_rgba(colors[i], 0.4),
                 name=regime_names[i],
                 legendgroup=f"regime_{i}",
                 showlegend=False,
