@@ -199,6 +199,9 @@ def compute_features(df: pd.DataFrame, rsi_period: int = 14) -> pd.DataFrame:
     # Normalize RSI to [-1, 1] for HMM
     data["RSI_norm"] = (data["RSI"] - 50) / 50
     
+    # EMA 20
+    data["EMA20"] = data["Close"].ewm(span=20, adjust=False).mean()
+    
     # Relative Volume (current / 20-period SMA)
     vol_sma = data["Volume"].rolling(window=20, min_periods=5).mean()
     data["rel_volume"] = (data["Volume"] / vol_sma.replace(0, np.nan)) - 1
@@ -210,6 +213,10 @@ def compute_features(df: pd.DataFrame, rsi_period: int = 14) -> pd.DataFrame:
     vol_std = vol_std if vol_std > 1e-8 else 1e-8
     data["vol_norm"] = (data["volatility"] - data["volatility"].mean()) / vol_std
     data["vol_norm"] = data["vol_norm"].clip(-3, 3)
+    
+    # Support & Resistance (rolling 20-period low/high)
+    data["support"] = data["Low"].rolling(window=20, min_periods=5).min()
+    data["resistance"] = data["High"].rolling(window=20, min_periods=5).max()
     
     data.dropna(inplace=True)
     return data
@@ -772,6 +779,325 @@ if run_analysis:
     """, unsafe_allow_html=True)
     
     st.markdown(confidence_note)
+    
+    # ─── STEP 9B: Entry Signals Panel ───
+    st.markdown("### 🎯 Posibles Ingresos")
+    st.caption("Señales basadas en régimen HMM + RSI + EMA20 + Soporte/Resistencia + Transiciones")
+    
+    price = df["Close"].iloc[-1]
+    rsi = df["RSI"].iloc[-1]
+    ema20 = df["EMA20"].iloc[-1]
+    support = df["support"].iloc[-1]
+    resistance = df["resistance"].iloc[-1]
+    rel_vol = df["rel_volume"].iloc[-1]
+    current_vol = df["volatility"].iloc[-1]
+    
+    # Detect regime transitions (last 5 periods)
+    recent_states = states[-5:] if len(states) >= 5 else states
+    regime_changed = len(set(recent_states)) > 1
+    prev_regime = states[-2] if len(states) >= 2 else current_regime
+    
+    # Transition probabilities for next period
+    trans_probs = trans_matrix[current_regime]
+    prob_up = sum(trans_probs[i] for i in range(n_regimes) if i > current_regime)
+    prob_down = sum(trans_probs[i] for i in range(n_regimes) if i < current_regime)
+    prob_stay = trans_probs[current_regime]
+    
+    # ── Generate Signals ──
+    signals = []
+    
+    # === LONG SIGNALS ===
+    long_score = 0
+    long_reasons = []
+    long_warnings = []
+    
+    # 1. Regime favorable for longs
+    if current_regime >= n_regimes // 2:
+        long_score += 2
+        long_reasons.append(f"Régimen {regime_names[current_regime]} favorable")
+    elif current_regime == n_regimes // 2 - 1:
+        long_score += 1
+        long_reasons.append("Régimen neutral — posible transición")
+    
+    # 2. RSI oversold (buying opportunity)
+    if rsi < 30:
+        long_score += 2
+        long_reasons.append(f"RSI sobrevendido ({rsi:.1f}) — zona de rebote")
+    elif rsi < 45:
+        long_score += 1
+        long_reasons.append(f"RSI bajo ({rsi:.1f}) — espacio para subir")
+    elif rsi > 70:
+        long_score -= 2
+        long_warnings.append(f"RSI sobrecomprado ({rsi:.1f}) — NO comprar")
+    
+    # 3. Price vs EMA20
+    if price > ema20:
+        long_score += 1
+        long_reasons.append(f"Precio encima de EMA20 (${ema20:,.2f})")
+    else:
+        pct_below = ((ema20 - price) / ema20) * 100
+        if pct_below > 5:
+            long_score += 1
+            long_reasons.append(f"Precio {pct_below:.1f}% debajo de EMA20 — posible mean reversion")
+        else:
+            long_warnings.append(f"Precio debajo de EMA20 (${ema20:,.2f})")
+    
+    # 4. Near support
+    dist_to_support = ((price - support) / price) * 100
+    if dist_to_support < 2:
+        long_score += 2
+        long_reasons.append(f"Cerca de soporte ${support:,.2f} ({dist_to_support:.1f}%)")
+    elif dist_to_support < 5:
+        long_score += 1
+        long_reasons.append(f"Soporte cercano en ${support:,.2f}")
+    
+    # 5. Regime transitioning upward
+    if regime_changed and current_regime > prev_regime:
+        long_score += 2
+        long_reasons.append(f"Transición alcista: {regime_names[prev_regime]} → {regime_names[current_regime]}")
+    
+    # 6. Probability of moving to higher regime
+    if prob_up > 0.15:
+        long_score += 1
+        long_reasons.append(f"Prob. transición alcista: {prob_up:.0%}")
+    
+    # 7. Volume confirmation
+    if rel_vol > 0.3:
+        long_score += 1
+        long_reasons.append(f"Volumen alto ({rel_vol:+.1f}x) — confirma movimiento")
+    
+    # === SHORT SIGNALS ===
+    short_score = 0
+    short_reasons = []
+    short_warnings = []
+    
+    # 1. Regime favorable for shorts
+    if current_regime <= n_regimes // 3:
+        short_score += 2
+        short_reasons.append(f"Régimen {regime_names[current_regime]} — tendencia bajista")
+    elif current_regime == n_regimes // 3 + 1:
+        short_score += 1
+        short_reasons.append("Régimen débil — posible continuación bajista")
+    
+    # 2. RSI overbought (shorting opportunity)
+    if rsi > 70:
+        short_score += 2
+        short_reasons.append(f"RSI sobrecomprado ({rsi:.1f}) — zona de reversión")
+    elif rsi > 55:
+        short_score += 1
+        short_reasons.append(f"RSI elevado ({rsi:.1f}) — presión vendedora probable")
+    elif rsi < 30:
+        short_score -= 2
+        short_warnings.append(f"RSI sobrevendido ({rsi:.1f}) — NO shortear")
+    
+    # 3. Price vs EMA20
+    if price < ema20:
+        short_score += 1
+        short_reasons.append(f"Precio debajo de EMA20 — tendencia bajista")
+    else:
+        pct_above = ((price - ema20) / ema20) * 100
+        if pct_above > 5:
+            short_score += 1
+            short_reasons.append(f"Precio {pct_above:.1f}% encima de EMA20 — posible corrección")
+    
+    # 4. Near resistance
+    dist_to_resistance = ((resistance - price) / price) * 100
+    if dist_to_resistance < 2:
+        short_score += 2
+        short_reasons.append(f"Cerca de resistencia ${resistance:,.2f} ({dist_to_resistance:.1f}%)")
+    elif dist_to_resistance < 5:
+        short_score += 1
+        short_reasons.append(f"Resistencia cercana en ${resistance:,.2f}")
+    
+    # 5. Regime transitioning downward
+    if regime_changed and current_regime < prev_regime:
+        short_score += 2
+        short_reasons.append(f"Transición bajista: {regime_names[prev_regime]} → {regime_names[current_regime]}")
+    
+    # 6. Probability of moving to lower regime
+    if prob_down > 0.15:
+        short_score += 1
+        short_reasons.append(f"Prob. transición bajista: {prob_down:.0%}")
+    
+    # 7. Volume confirmation
+    if rel_vol > 0.3:
+        short_score += 1
+        short_reasons.append(f"Volumen alto ({rel_vol:+.1f}x) — confirma movimiento")
+    
+    # === Calculate entry levels ===
+    atr = current_vol * price  # Approximate ATR from volatility
+    atr = max(atr, price * 0.01)  # Minimum 1% ATR
+    
+    # Long entry setup
+    long_entry = price
+    long_sl = max(support - atr * 0.5, price * 0.97)  # Below support or -3%
+    long_tp1 = price + (price - long_sl) * 2  # 1:2 R:R
+    long_tp2 = price + (price - long_sl) * 3  # 1:3 R:R
+    long_risk_pct = ((long_entry - long_sl) / long_entry) * 100
+    long_rr = (long_tp1 - long_entry) / (long_entry - long_sl) if long_entry > long_sl else 0
+    
+    # Short entry setup
+    short_entry = price
+    short_sl = min(resistance + atr * 0.5, price * 1.03)  # Above resistance or +3%
+    short_tp1 = price - (short_sl - price) * 2  # 1:2 R:R
+    short_tp2 = price - (short_sl - price) * 3  # 1:3 R:R
+    short_risk_pct = ((short_sl - short_entry) / short_entry) * 100
+    short_rr = (short_entry - short_tp1) / (short_sl - short_entry) if short_sl > short_entry else 0
+    
+    # === Determine signal strength ===
+    def signal_strength(score):
+        if score >= 5:
+            return "FUERTE", "💪"
+        elif score >= 3:
+            return "MODERADA", "📊"
+        elif score >= 1:
+            return "DÉBIL", "🔍"
+        else:
+            return "SIN SEÑAL", "⛔"
+    
+    long_strength, long_icon = signal_strength(long_score)
+    short_strength, short_icon = signal_strength(short_score)
+    
+    # === Display Signals ===
+    col_long, col_short = st.columns(2)
+    
+    with col_long:
+        long_border = "#00cc66" if long_score >= 3 else "#ffaa00" if long_score >= 1 else "#555"
+        st.markdown(f"""
+        <div style="background: rgba(0,204,102,0.05); border: 2px solid {long_border}; 
+                    border-radius: 12px; padding: 1.5rem; min-height: 400px;">
+            <h3 style="color: #00cc66; margin: 0 0 0.5rem 0; font-family: 'JetBrains Mono', monospace;">
+                {long_icon} LONG — {long_strength}
+            </h3>
+            <div style="font-size: 2rem; font-weight: 700; color: #00cc66; 
+                        font-family: 'JetBrains Mono', monospace;">
+                Score: {long_score}/10
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        if long_score >= 1:
+            st.markdown("**✅ Razones a favor:**")
+            for r in long_reasons:
+                st.markdown(f"- {r}")
+            if long_warnings:
+                st.markdown("**⚠️ Advertencias:**")
+                for w in long_warnings:
+                    st.markdown(f"- {w}")
+            
+            st.markdown("---")
+            st.markdown("**📐 Setup sugerido:**")
+            st.markdown(f"""
+            | Nivel | Precio | Distancia |
+            |-------|--------|-----------|
+            | **Entry** | ${long_entry:,.2f} | — |
+            | **Stop Loss** | ${long_sl:,.2f} | -{long_risk_pct:.1f}% |
+            | **TP1 (1:2)** | ${long_tp1:,.2f} | +{((long_tp1-long_entry)/long_entry)*100:.1f}% |
+            | **TP2 (1:3)** | ${long_tp2:,.2f} | +{((long_tp2-long_entry)/long_entry)*100:.1f}% |
+            """)
+            st.markdown(f"**R:R** = 1:{long_rr:.1f}")
+        else:
+            st.markdown("*No hay condiciones favorables para LONG en este momento.*")
+    
+    with col_short:
+        short_border = "#ff4444" if short_score >= 3 else "#ffaa00" if short_score >= 1 else "#555"
+        st.markdown(f"""
+        <div style="background: rgba(255,68,68,0.05); border: 2px solid {short_border}; 
+                    border-radius: 12px; padding: 1.5rem; min-height: 400px;">
+            <h3 style="color: #ff4444; margin: 0 0 0.5rem 0; font-family: 'JetBrains Mono', monospace;">
+                {short_icon} SHORT — {short_strength}
+            </h3>
+            <div style="font-size: 2rem; font-weight: 700; color: #ff4444; 
+                        font-family: 'JetBrains Mono', monospace;">
+                Score: {short_score}/10
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        if short_score >= 1:
+            st.markdown("**✅ Razones a favor:**")
+            for r in short_reasons:
+                st.markdown(f"- {r}")
+            if short_warnings:
+                st.markdown("**⚠️ Advertencias:**")
+                for w in short_warnings:
+                    st.markdown(f"- {w}")
+            
+            st.markdown("---")
+            st.markdown("**📐 Setup sugerido:**")
+            st.markdown(f"""
+            | Nivel | Precio | Distancia |
+            |-------|--------|-----------|
+            | **Entry** | ${short_entry:,.2f} | — |
+            | **Stop Loss** | ${short_sl:,.2f} | +{short_risk_pct:.1f}% |
+            | **TP1 (1:2)** | ${short_tp1:,.2f} | -{((short_entry-short_tp1)/short_entry)*100:.1f}% |
+            | **TP2 (1:3)** | ${short_tp2:,.2f} | -{((short_entry-short_tp2)/short_entry)*100:.1f}% |
+            """)
+            st.markdown(f"**R:R** = 1:{short_rr:.1f}")
+        else:
+            st.markdown("*No hay condiciones favorables para SHORT en este momento.*")
+    
+    # === Transition Forecast ===
+    st.markdown("### 🔮 Pronóstico de Transición")
+    st.caption("Probabilidad de cambio de régimen en el próximo período")
+    
+    forecast_cols = st.columns(3)
+    with forecast_cols[0]:
+        st.markdown(f"""
+        <div class="metric-box">
+            <div class="metric-label">Prob. Mejora (↑)</div>
+            <div class="metric-value" style="color: #00cc66;">{prob_up:.1%}</div>
+        </div>
+        """, unsafe_allow_html=True)
+    with forecast_cols[1]:
+        st.markdown(f"""
+        <div class="metric-box">
+            <div class="metric-label">Prob. Mantiene (→)</div>
+            <div class="metric-value" style="color: #ffaa00;">{prob_stay:.1%}</div>
+        </div>
+        """, unsafe_allow_html=True)
+    with forecast_cols[2]:
+        st.markdown(f"""
+        <div class="metric-box">
+            <div class="metric-label">Prob. Empeora (↓)</div>
+            <div class="metric-value" style="color: #ff4444;">{prob_down:.1%}</div>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    # === Recent Regime Changes (last 10 periods) ===
+    st.markdown("### 📜 Cambios de Régimen Recientes")
+    
+    lookback = min(20, len(states))
+    recent_df_data = []
+    for j in range(1, lookback):
+        idx = len(states) - lookback + j
+        if idx > 0 and states[idx] != states[idx - 1]:
+            direction = "📈 ALCISTA" if states[idx] > states[idx - 1] else "📉 BAJISTA"
+            recent_df_data.append({
+                "Fecha": df.index[idx].strftime("%Y-%m-%d %H:%M") if hasattr(df.index[idx], 'strftime') else str(df.index[idx]),
+                "Transición": f"{regime_names[states[idx-1]]} → {regime_names[states[idx]]}",
+                "Dirección": direction,
+                "Precio": f"${df['Close'].iloc[idx]:,.2f}",
+            })
+    
+    if recent_df_data:
+        recent_changes_df = pd.DataFrame(recent_df_data[::-1])  # Most recent first
+        st.dataframe(recent_changes_df, hide_index=True, use_container_width=True)
+    else:
+        st.info("Sin cambios de régimen en los últimos 20 períodos — régimen estable.")
+    
+    # Disclaimer
+    st.markdown("""
+    <div style="background: rgba(255,170,0,0.1); border: 1px solid rgba(255,170,0,0.3); 
+                border-radius: 8px; padding: 0.8rem; margin-top: 1rem;">
+        <p style="color: #ffaa00; margin: 0; font-size: 0.8rem;">
+            ⚠️ <b>DISCLAIMER:</b> Estas señales son generadas por un modelo estadístico y NO constituyen 
+            asesoramiento financiero. Siempre verificá con tu propio análisis técnico y respetá tu 
+            protocolo de gestión de riesgo. El modelo puede generar señales incorrectas especialmente 
+            en mercados altamente volátiles o durante eventos inesperados.
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
     
     # ─── STEP 10: Model Info ───
     with st.expander("🔍 Información del Modelo"):
