@@ -13,6 +13,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import yfinance as yf
 from hmmlearn.hmm import GaussianHMM
+import requests
 from datetime import datetime, timedelta
 import warnings
 warnings.filterwarnings("ignore")
@@ -158,6 +159,44 @@ REGIME_NAMES_MAP = {
     6: ["💀 Crash", "🐻 Bear", "📉 Weak Bear", "📈 Weak Bull", "🐂 Bull", "🚀 Euphoria"],
     7: ["💀 Crash", "🐻 Deep Bear", "📉 Bear", "➡️ Neutral", "📈 Bull", "🐂 Strong Bull", "🚀 Euphoria"],
 }
+
+# Binance symbol mapping for real-time prices
+BINANCE_SYMBOLS = {
+    "BTC-USD": "BTCUSDT",
+    "ETH-USD": "ETHUSDT",
+    "SOL-USD": "SOLUSDT",
+    "DOT-USD": "DOTUSDT",
+    "LINK-USD": "LINKUSDT",
+    "AVAX-USD": "AVAXUSDT",
+    "ADA-USD": "ADAUSDT",
+    "XRP-USD": "XRPUSDT",
+    "HBAR-USD": "HBARUSDT",
+    "TAO-USD": "TAOUSDT",
+}
+
+
+def get_realtime_price(ticker: str) -> dict:
+    """Fetch real-time price from Binance public API (no auth needed)."""
+    symbol = BINANCE_SYMBOLS.get(ticker)
+    if not symbol:
+        return None
+    try:
+        # Get 24h ticker for price + change
+        url = f"https://api.binance.com/api/v3/ticker/24hr?symbol={symbol}"
+        resp = requests.get(url, timeout=5)
+        if resp.status_code == 200:
+            data = resp.json()
+            return {
+                "price": float(data["lastPrice"]),
+                "change_pct": float(data["priceChangePercent"]),
+                "high_24h": float(data["highPrice"]),
+                "low_24h": float(data["lowPrice"]),
+                "volume_24h": float(data["quoteVolume"]),
+                "source": "Binance (real-time)",
+            }
+    except Exception:
+        pass
+    return None
 
 
 # ─────────────────────────────────────────────
@@ -476,20 +515,56 @@ if run_analysis:
     current_name = regime_names[current_regime]
     current_color = colors[current_regime]
     
+    # Fetch real-time price from Binance
+    rt = get_realtime_price(ticker)
+    realtime_price = rt["price"] if rt else None
+    yf_price = df['Close'].iloc[-1]
+    display_price = realtime_price if realtime_price else yf_price
+    price_source = rt["source"] if rt else "yfinance (con delay)"
+    
+    # Show delay warning if significant difference
+    if realtime_price and abs(realtime_price - yf_price) / yf_price > 0.005:
+        price_diff_pct = ((realtime_price - yf_price) / yf_price) * 100
+        st.markdown(f"""
+        <div style="background: rgba(255,170,0,0.1); border: 1px solid rgba(255,170,0,0.3); 
+                    border-radius: 8px; padding: 0.5rem 1rem; margin-bottom: 0.5rem;">
+            <p style="color: #ffaa00; margin: 0; font-size: 0.8rem;">
+                ⚡ <b>Precio en tiempo real:</b> ${realtime_price:,.4f} (Binance) | 
+                Última vela cerrada: ${yf_price:,.4f} (yfinance) | 
+                Diferencia: {price_diff_pct:+.2f}%
+            </p>
+        </div>
+        """, unsafe_allow_html=True)
+    
     st.markdown("---")
     
     # Top metrics row
     col1, col2, col3, col4, col5 = st.columns(5)
     
     with col1:
-        st.markdown(f"""
-        <div class="metric-box">
-            <div class="metric-label">Precio Actual</div>
-            <div class="metric-value" style="color: #c9d1d9;">
-                ${df['Close'].iloc[-1]:,.2f}
+        if rt:
+            chg_color = "#00cc66" if rt["change_pct"] >= 0 else "#ff4444"
+            st.markdown(f"""
+            <div class="metric-box">
+                <div class="metric-label">Precio Real-Time</div>
+                <div class="metric-value" style="color: #c9d1d9;">
+                    ${realtime_price:,.4f}
+                </div>
+                <div style="color: {chg_color}; font-size: 0.75rem; font-family: 'JetBrains Mono', monospace;">
+                    {rt['change_pct']:+.2f}% (24h)
+                </div>
             </div>
-        </div>
-        """, unsafe_allow_html=True)
+            """, unsafe_allow_html=True)
+        else:
+            st.markdown(f"""
+            <div class="metric-box">
+                <div class="metric-label">Precio Actual</div>
+                <div class="metric-value" style="color: #c9d1d9;">
+                    ${yf_price:,.2f}
+                </div>
+                <div style="color: #8b949e; font-size: 0.65rem;">⚠️ yfinance (delay)</div>
+            </div>
+            """, unsafe_allow_html=True)
     
     with col2:
         ret_24h = df["log_return"].iloc[-1] * 100
@@ -783,8 +858,10 @@ if run_analysis:
     # ─── STEP 9B: Entry Signals Panel ───
     st.markdown("### 🎯 Posibles Ingresos")
     st.caption("Señales basadas en régimen HMM + RSI + EMA20 + Soporte/Resistencia + Transiciones")
+    if rt:
+        st.caption(f"⚡ Usando precio en tiempo real: ${display_price:,.4f} (Binance)")
     
-    price = df["Close"].iloc[-1]
+    price = display_price  # Use real-time price if available
     rsi = df["RSI"].iloc[-1]
     ema20 = df["EMA20"].iloc[-1]
     support = df["support"].iloc[-1]
